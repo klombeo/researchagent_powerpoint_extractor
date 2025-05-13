@@ -8,25 +8,79 @@ from pptx import Presentation
 import openpyxl
 from openpyxl.styles import numbers
 from PIL import Image
+import xml.etree.ElementTree as ET
 
 # ----------------- Helper Functions -----------------
+
+def map_embedded_files_to_slides(pptx_file):
+    rels_map = {}
+    with zipfile.ZipFile(pptx_file, 'r') as z:
+        slide_files = [f for f in z.namelist() if f.startswith('ppt/slides/slide') and f.endswith('.xml')]
+        for slide_file in slide_files:
+            slide_index = int(slide_file.split("slide")[-1].split(".xml")[0]) - 1
+            rel_path = f"ppt/slides/_rels/slide{slide_index+1}.xml.rels"
+            if rel_path in z.namelist():
+                rel_data = z.read(rel_path)
+                tree = ET.fromstring(rel_data)
+                for rel in tree.findall(".//{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"):
+                    target = rel.attrib.get("Target")
+                    if target and target.startswith("../embeddings/"):
+                        embedded_file = "ppt/embeddings/" + os.path.basename(target)
+                        rels_map[embedded_file] = slide_index
+    return rels_map
 
 def extract_excel_from_pptx(pptx_file, output_dir, base_filename):
     with zipfile.ZipFile(pptx_file, 'r') as z:
         embedded_files = [f for f in z.namelist() if f.startswith('ppt/embeddings/') and (f.endswith('.xlsx') or f.endswith('.xls'))]
         total_extracted = 0
 
-        for i, embedded_file in enumerate(embedded_files):
+        prs = Presentation(pptx_file)
+        slide_titles = []
+        for slide in prs.slides:
+            title = ""
+            subtitle = ""
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    text = shape.text.strip()
+                    if not title:
+                        title = text
+                    elif not subtitle:
+                        subtitle = text
+            slide_titles.append(f"{title} - {subtitle}" if subtitle else title)
+
+        embedded_map = map_embedded_files_to_slides(pptx_file)
+
+        for embedded_file in embedded_files:
             file_data = z.read(embedded_file)
             ext = ".xlsx" if embedded_file.endswith(".xlsx") else ".xls"
-            out_filename = f"{base_filename}_embedded_excel_{i+1}{ext}"
+            index = embedded_files.index(embedded_file)
+            out_filename = f"{base_filename}_embedded_excel_{index+1}{ext}"
             out_path = os.path.join(output_dir, out_filename)
 
             with open(out_path, 'wb') as f:
                 f.write(file_data)
                 total_extracted += 1
 
+            if ext == ".xlsx":
+                try:
+                    wb = openpyxl.load_workbook(out_path)
+                    for sheet in wb.worksheets:
+                        max_col = sheet.max_column
+                        sheet.insert_cols(max_col + 1)
+                        sheet.cell(row=1, column=max_col + 1).value = "table_title"
+                        slide_idx = embedded_map.get(embedded_file, index)
+                        title_val = slide_titles[slide_idx] if slide_idx < len(slide_titles) else ""
+                        for row in range(2, sheet.max_row + 1):
+                            sheet.cell(row=row, column=max_col + 1).value = title_val
+                    wb.save(out_path)
+                except Exception as e:
+                    print("Error adding table_title column:", e)
+
     return total_extracted
+
+# (rest of the code remains unchanged)
+
+# NOTE: Make sure the rest of your application code (cleaning, UI, image extraction) follows below
 
 def clean_excel_files_in_folder(folder_path):
     for filename in os.listdir(folder_path):
